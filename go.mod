@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	github.com/gordonklaus/portaudio v0.0.0-20250206071425-98a94950218b // indirect
 	github.com/hajimehoshi/go-mp3 v0.3.0 // indirect
 	github.com/icza/bitio v1.0.0 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect

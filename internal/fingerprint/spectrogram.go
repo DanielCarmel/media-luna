@@ -14,29 +14,40 @@ import (
 	"github.com/maddyblue/go-dsp/window"
 )
 
-// Spectrogram computes the spectrogram of a WAV file.
+// Spectrogram computes the spectrogram of a WAV file using proper STFT.
 func SamplesToSpectrogram(samples []float64, sampleRate int) ([][]complex128, error) {
-	// Apply Hamming window
-	windowHamming := window.Hamming(len(samples))
-	for i := range samples {
-		samples[i] *= windowHamming[i]
-	}
-
 	// Apply low-pass filter (optional)
 	filteredSamples := lowPassFilter(samples, WINDOW_SIZE)
 
 	// Downsample
-	downsampledSamples, err := downsample(filteredSamples, sampleRate, sampleRate / DOWNSAMPLE_RATIO)
+	downsampledSamples, err := downsample(filteredSamples, sampleRate, sampleRate/DOWNSAMPLE_RATIO)
 	if err != nil {
 		return nil, err
 	}
 
-	// Compute FFT
+	// Compute STFT with proper overlapping windows
+	hopSize := WINDOW_SIZE / 4 // 75% overlap as per Shazam paper
 	spectrogram := [][]complex128{}
-	for i := 0; i < len(downsampledSamples); i += WINDOW_SIZE {
-		frame := downsampledSamples[i : i + WINDOW_SIZE]
+
+	// Create Hamming window once
+	hammingWindow := window.Hamming(WINDOW_SIZE)
+
+	for i := 0; i <= len(downsampledSamples)-WINDOW_SIZE; i += hopSize {
+		// Extract frame
+		frame := make([]float64, WINDOW_SIZE)
+		copy(frame, downsampledSamples[i:i+WINDOW_SIZE])
+
+		// Apply Hamming window to each frame
+		for j := range frame {
+			frame[j] *= hammingWindow[j]
+		}
+
+		// Compute FFT
 		fftOut := fft.FFTReal(frame)
-		spectrogram = append(spectrogram, fftOut)
+
+		// Only keep the first half (positive frequencies)
+		halfSize := len(fftOut) / 2
+		spectrogram = append(spectrogram, fftOut[:halfSize])
 	}
 
 	return spectrogram, nil
@@ -46,7 +57,10 @@ func SamplesToSpectrogram(samples []float64, sampleRate int) ([][]complex128, er
 func SpectrogramToImage(spectrogram [][]complex128, peaks []Peak, sampleRate int, path string) error {
 	// Calculate dimensions
 	numFrames := len(spectrogram)
-	numFreqs := len(spectrogram[0]) / 2 // Consider only positive frequencies
+	if numFrames == 0 {
+		return fmt.Errorf("empty spectrogram")
+	}
+	numFreqs := len(spectrogram[0]) // Already using positive frequencies only
 	imgWidth := numFrames
 	imgHeight := numFreqs
 
@@ -55,11 +69,18 @@ func SpectrogramToImage(spectrogram [][]complex128, peaks []Peak, sampleRate int
 
 	// Normalize magnitudes using RMS
 	rms := calculateRMS(spectrogram)
+	if rms == 0 {
+		rms = 1 // Avoid division by zero
+	}
 
 	for x, frame := range spectrogram {
-		for y := 0; y < numFreqs; y++ {
+		for y := 0; y < numFreqs && y < len(frame); y++ {
 			mag := cmplx.Abs(frame[y]) / rms
-			gray := uint8(255 * mag)
+			// Use log scale for better visualization
+			if mag > 0 {
+				mag = math.Log10(1 + mag*9) // Log scale mapping
+			}
+			gray := uint8(math.Min(255, 255*mag))
 			img.Set(x, imgHeight-y-1, color.RGBA{gray, gray, gray, 255}) // Invert y-axis
 		}
 	}
@@ -67,8 +88,11 @@ func SpectrogramToImage(spectrogram [][]complex128, peaks []Peak, sampleRate int
 	// Draw peaks
 	peakColor := color.RGBA{255, 0, 0, 255} // Red color for peaks
 	for _, peak := range peaks {
-		peakIndex := cmplx.Abs(peak.Freq) / rms
-		img.Set(int(peak.Time), imgHeight-int(peakIndex)-1, peakColor) // Invert y-axis
+		x := int(peak.Time)
+		y := peak.FreqBin
+		if x >= 0 && x < imgWidth && y >= 0 && y < imgHeight {
+			img.Set(x, imgHeight-y-1, peakColor) // Invert y-axis
+		}
 	}
 
 	// Save file

@@ -3,6 +3,7 @@ package mysql
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
 	config "github.com/media-luna/eureka/configs"
@@ -26,6 +27,20 @@ type Song struct {
 	DateCreated   string
 }
 
+// FingerprintMatch represents a fingerprint match from the database
+type FingerprintMatch struct {
+	Hash   string
+	SongID int
+	Offset int
+}
+
+// SongInfo represents basic song information
+type SongInfo struct {
+	ID     int
+	Name   string
+	Artist string
+}
+
 const (
 	createSongsTableSQL = `
 		CREATE TABLE IF NOT EXISTS %s (
@@ -43,7 +58,7 @@ const (
 
 	createFingerprintsTableSQL = `
 		CREATE TABLE IF NOT EXISTS %s (
-			%s BINARY(10) NOT NULL,
+			%s CHAR(40) NOT NULL,
 			%s MEDIUMINT UNSIGNED NOT NULL,
 			%s INT UNSIGNED NOT NULL,
 			date_created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -205,7 +220,7 @@ func (m *DB) InsertSong(songName string, artistName string, fileHash string, tot
 
 // Insert fingerprints into fingerprints table
 func (m *DB) InsertFingerprints(fingerprint string, songID int, offset int) error {
-	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s, %s, %s) VALUES (?, UNHEX(?), ?)",
+	query := fmt.Sprintf("INSERT IGNORE INTO %s (%s, %s, %s) VALUES (?, ?, ?)",
 		m.cfg.Tables.Fingerprints.Name,
 		m.cfg.Tables.Songs.Fields.ID,
 		m.cfg.Tables.Fingerprints.Fields.Hash,
@@ -363,4 +378,70 @@ func (m *DB) DeleteSong(songID int) error {
 
 	logger.Info(fmt.Sprintf("Successfully deleted song with ID %d", songID))
 	return nil
+}
+
+// QueryFingerprints queries the database for matching fingerprints
+func (m *DB) QueryFingerprints(hashes []string) ([]FingerprintMatch, error) {
+	if len(hashes) == 0 {
+		return []FingerprintMatch{}, nil
+	}
+
+	// Build query with placeholders
+	placeholders := strings.Repeat("?,", len(hashes))
+	placeholders = placeholders[:len(placeholders)-1] // Remove last comma
+
+	query := fmt.Sprintf(`
+		SELECT %s, %s, %s 
+		FROM %s 
+		WHERE %s IN (%s)`,
+		m.cfg.Tables.Fingerprints.Fields.Hash,
+		m.cfg.Tables.Songs.Fields.ID,
+		m.cfg.Tables.Fingerprints.Fields.Offset,
+		m.cfg.Tables.Fingerprints.Name,
+		m.cfg.Tables.Fingerprints.Fields.Hash,
+		placeholders)
+
+	// Convert hashes to interface{} slice for query
+	args := make([]interface{}, len(hashes))
+	for i, hash := range hashes {
+		args[i] = hash
+	}
+
+	rows, err := m.conn.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error querying fingerprints: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []FingerprintMatch
+	for rows.Next() {
+		var match FingerprintMatch
+		if err := rows.Scan(&match.Hash, &match.SongID, &match.Offset); err != nil {
+			return nil, fmt.Errorf("error scanning fingerprint match: %w", err)
+		}
+		matches = append(matches, match)
+	}
+
+	return matches, nil
+}
+
+// GetSongByID retrieves song information by ID
+func (m *DB) GetSongByID(songID int) (SongInfo, error) {
+	query := fmt.Sprintf("SELECT %s, %s, %s FROM %s WHERE %s = ?",
+		m.cfg.Tables.Songs.Fields.ID,
+		m.cfg.Tables.Songs.Fields.Name,
+		m.cfg.Tables.Songs.Fields.Artist,
+		m.cfg.Tables.Songs.Name,
+		m.cfg.Tables.Songs.Fields.ID)
+
+	var song SongInfo
+	err := m.conn.QueryRow(query, songID).Scan(&song.ID, &song.Name, &song.Artist)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return SongInfo{}, fmt.Errorf("song with ID %d not found", songID)
+		}
+		return SongInfo{}, fmt.Errorf("error querying song: %w", err)
+	}
+
+	return song, nil
 }
